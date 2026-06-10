@@ -7,12 +7,26 @@ const jwt = require('jsonwebtoken')
 const models = require('./models')
 
 const app = express()
-app.use(cors())
+
+// CORS — lock to frontend origin in production
+const allowedOrigins = process.env.FRONTEND_URL
+  ? [process.env.FRONTEND_URL]
+  : ['http://localhost:5173', 'http://localhost:4173']
+app.use(cors({ origin: allowedOrigins, credentials: true }))
 app.use(express.json({ limit: '10mb' }))
 
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/lifetrack')
+// DB connection
+mongoose
+  .connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/lifetrack')
+  .then(() => console.log('MongoDB connected'))
+  .catch((err) => { console.error('MongoDB connection failed:', err); process.exit(1) })
 
-const JWT_SECRET = process.env.JWT_SECRET || 'secret-lifeos-key'
+// JWT secret — must be set explicitly in production
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET env var is required in production')
+  process.exit(1)
+}
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-do-not-use-in-prod'
 
 // Middleware
 const auth = (req, res, next) => {
