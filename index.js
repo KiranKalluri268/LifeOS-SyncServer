@@ -8,11 +8,30 @@ const models = require('./models')
 
 const app = express()
 
-// CORS — lock to frontend origin in production
+// CORS — use function-based origin handler so it is evaluated per-request
 const allowedOrigins = process.env.FRONTEND_URL
-  ? [process.env.FRONTEND_URL]
+  ? process.env.FRONTEND_URL.split(',').map(o => o.trim())
   : ['http://localhost:5173', 'http://localhost:4173']
-app.use(cors({ origin: allowedOrigins, credentials: true }))
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (server-to-server, curl, Postman)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true)
+    } else {
+      console.warn(`CORS blocked origin: ${origin}`)
+      callback(new Error(`Origin ${origin} not allowed by CORS`))
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}
+
+app.use(cors(corsOptions))
+// Explicitly handle preflight OPTIONS for all routes
+app.options('*', cors(corsOptions))
 app.use(express.json({ limit: '10mb' }))
 
 // DB connection
