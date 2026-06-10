@@ -30,8 +30,8 @@ const corsOptions = {
 }
 
 app.use(cors(corsOptions))
-// Explicitly handle preflight OPTIONS for all routes
-app.options('*', cors(corsOptions))
+// Explicitly handle preflight OPTIONS for all routes (Express 5 requires named wildcard)
+app.options('/{*path}', cors(corsOptions))
 app.use(express.json({ limit: '10mb' }))
 
 // DB connection
