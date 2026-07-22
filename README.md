@@ -231,3 +231,13 @@ the API to multiple instances.
 - Add refresh tokens, structured production logging, a shared rate-limit store,
   and automated tests before exposing the API to untrusted users.
 - Avoid logging credentials, tokens, or MongoDB connection strings.
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
+security requirements, sync compatibility guidance, and verification steps.
+
+## License
+
+LifeOS Sync Server is free software licensed under the GNU General Public
+License version 3 only. See [LICENSE](LICENSE) for the full license text.
