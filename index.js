@@ -7,156 +7,203 @@ const jwt = require('jsonwebtoken')
 const models = require('./models')
 
 const app = express()
-
-// CORS — use function-based origin handler so it is evaluated per-request
+if (process.env.NODE_ENV === 'production') app.set('trust proxy', 1)
 const allowedOrigins = process.env.FRONTEND_URL
-  ? process.env.FRONTEND_URL.split(',').map(o => o.trim())
+  ? process.env.FRONTEND_URL.split(',').map(origin => origin.trim())
   : ['http://localhost:5173', 'http://localhost:4173']
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (server-to-server, curl, Postman)
-    if (!origin) return callback(null, true)
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true)
-    } else {
-      console.warn(`CORS blocked origin: ${origin}`)
-      callback(new Error(`Origin ${origin} not allowed by CORS`))
-    }
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true)
+    callback(new Error(`Origin ${origin} not allowed by CORS`))
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }
 
 app.use(cors(corsOptions))
-// Explicitly handle preflight OPTIONS for all routes (Express 5 requires named wildcard)
 app.options('/{*path}', cors(corsOptions))
-app.use(express.json({ limit: '10mb' }))
+app.use(express.json({ limit: '1mb' }))
 
-// DB connection
-mongoose
-  .connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/lifetrack')
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/lifetrack')
   .then(() => console.log('MongoDB connected'))
-  .catch((err) => { console.error('MongoDB connection failed:', err); process.exit(1) })
+  .catch(error => { console.error('MongoDB connection failed:', error); process.exit(1) })
 
-// JWT secret — must be set explicitly in production
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
-  console.error('FATAL: JWT_SECRET env var is required in production')
+  console.error('FATAL: JWT_SECRET is required in production')
   process.exit(1)
 }
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-do-not-use-in-prod'
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d'
 
-// Middleware
-const auth = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1]
-  if (!token) return res.status(401).json({ error: 'Unauthorized' })
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET)
-    req.userId = decoded.userId
+// Small in-memory limiter suitable for a single API instance. Use a shared
+// store such as Redis before scaling the service horizontally.
+function rateLimit({ windowMs, max }) {
+  const clients = new Map()
+  const cleanup = setInterval(() => {
+    const now = Date.now()
+    for (const [key, value] of clients) if (value.resetAt <= now) clients.delete(key)
+  }, windowMs)
+  cleanup.unref()
+
+  return (req, res, next) => {
+    const now = Date.now()
+    const key = req.ip
+    const current = clients.get(key)
+    const entry = !current || current.resetAt <= now ? { count: 0, resetAt: now + windowMs } : current
+    entry.count += 1
+    clients.set(key, entry)
+    res.set('RateLimit-Limit', String(max))
+    res.set('RateLimit-Remaining', String(Math.max(0, max - entry.count)))
+    res.set('RateLimit-Reset', String(Math.ceil(entry.resetAt / 1000)))
+    if (entry.count > max) return res.status(429).json({ error: 'Too many requests; try again later' })
     next()
-  } catch (err) {
-    res.status(401).json({ error: 'Invalid token' })
   }
 }
 
-// Auth Routes
-app.post('/api/auth/register', async (req, res) => {
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 })
+const syncLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 })
+
+const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const isString = (value, max = 500) => typeof value === 'string' && value.length > 0 && value.length <= max
+const isOptionalString = (value, max = 500) => value === undefined || (typeof value === 'string' && value.length <= max)
+const isNumber = value => typeof value === 'number' && Number.isFinite(value)
+const isIsoDate = value => isString(value, 40) && !Number.isNaN(Date.parse(value))
+const isDay = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+const isUuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+
+function validateAuthBody(body) {
+  if (!isObject(body)) return 'Request body must be an object'
+  if (typeof body.email !== 'string' || body.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) return 'A valid email is required'
+  if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) return 'Password must be 8–128 characters'
+  return null
+}
+
+const commonRecordValid = item => isObject(item) && isUuid(item.syncId) && typeof item.deleted === 'boolean' && isIsoDate(item.createdAt) && isIsoDate(item.updatedAt)
+const validators = {
+  foodLogs: item => commonRecordValid(item) && isDay(item.date) && ['breakfast', 'lunch', 'dinner', 'snack', 'other'].includes(item.mealType) && isString(item.foodName, 200) && isNumber(item.calories) && isNumber(item.protein) && isNumber(item.carbs) && isNumber(item.fat) && isNumber(item.servingSize) && isString(item.servingUnit, 30) && isNumber(item.quantity) && ['manual', 'openfoodfacts', 'barcode'].includes(item.source) && isOptionalString(item.brand, 200) && isOptionalString(item.notes, 1000),
+  categories: item => commonRecordValid(item) && isString(item.name, 100) && isString(item.icon, 100) && isString(item.color, 30) && typeof item.isDefault === 'boolean',
+  transactions: item => commonRecordValid(item) && ['expense', 'income'].includes(item.type) && isNumber(item.amount) && item.amount >= 0 && isUuid(item.categorySyncId) && isDay(item.date) && isOptionalString(item.note, 1000),
+  activityLogs: item => commonRecordValid(item) && isDay(item.date) && isString(item.category, 50) && isIsoDate(item.startTime) && isIsoDate(item.endTime) && isNumber(item.durationMins) && item.durationMins >= 0 && isOptionalString(item.note, 1000),
+  sleepLogs: item => commonRecordValid(item) && isDay(item.date) && isIsoDate(item.bedtime) && isIsoDate(item.wakeTime) && isNumber(item.durationMins) && item.durationMins >= 0 && Number.isInteger(item.quality) && item.quality >= 1 && item.quality <= 5 && isOptionalString(item.notes, 1000),
+}
+
+function validateChanges(body) {
+  if (!isObject(body) || !isObject(body.changes)) return 'changes must be an object'
+  const allowed = Object.keys(validators)
+  if (Object.keys(body.changes).some(key => !allowed.includes(key))) return 'changes contains an unsupported collection'
+  let total = 0
+  for (const name of allowed) {
+    const items = body.changes[name] ?? []
+    if (!Array.isArray(items)) return `${name} must be an array`
+    total += items.length
+    if (items.some(item => !validators[name](item))) return `${name} contains an invalid record`
+  }
+  return total > 500 ? 'A sync request may contain at most 500 records' : null
+}
+
+function authenticate(req, res, next) {
+  const [scheme, token] = (req.headers.authorization || '').split(' ')
+  if (scheme !== 'Bearer' || !token) return res.status(401).json({ error: 'Unauthorized' })
   try {
-    const { email, password } = req.body
-    const hash = await bcrypt.hash(password, 10)
-    const user = await models.User.create({ email, password: hash })
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET)
-    res.json({ token, userId: user._id })
-  } catch (err) {
-    res.status(400).json({ error: 'Registration failed' })
+    req.userId = jwt.verify(token, JWT_SECRET).userId
+    next()
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' })
+  }
+}
+
+app.get('/api/health', (_req, res) => {
+  const database = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+  res.status(database === 'connected' ? 200 : 503).json({ status: database === 'connected' ? 'ok' : 'degraded', database })
+})
+
+app.post('/api/auth/register', authLimiter, async (req, res) => {
+  const validationError = validateAuthBody(req.body)
+  if (validationError) return res.status(400).json({ error: validationError })
+  try {
+    const email = req.body.email.trim().toLowerCase()
+    const password = await bcrypt.hash(req.body.password, 12)
+    const user = await models.User.create({ email, password })
+    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
+    res.status(201).json({ token, userId: user._id })
+  } catch (error) {
+    if (error?.code === 11000) return res.status(409).json({ error: 'An account with that email already exists' })
+    res.status(500).json({ error: 'Registration failed' })
   }
 })
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
+  const validationError = validateAuthBody(req.body)
+  if (validationError) return res.status(400).json({ error: validationError })
   try {
-    const { email, password } = req.body
-    const user = await models.User.findOne({ email })
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ error: 'Invalid credentials' })
-    }
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET)
+    const user = await models.User.findOne({ email: req.body.email.trim().toLowerCase() })
+    if (!user || !(await bcrypt.compare(req.body.password, user.password))) return res.status(401).json({ error: 'Invalid credentials' })
+    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
     res.json({ token, userId: user._id })
-  } catch (err) {
-    res.status(400).json({ error: 'Login failed' })
+  } catch {
+    res.status(500).json({ error: 'Login failed' })
   }
 })
 
-// Sync Push (Client -> Server)
-app.post('/api/sync/push', auth, async (req, res) => {
+app.post('/api/sync/push', syncLimiter, authenticate, async (req, res) => {
+  const validationError = validateChanges(req.body)
+  if (validationError) return res.status(400).json({ error: validationError })
+
   try {
-    const { changes } = req.body
-    // changes is an object: { foodLogs: [...], categories: [...], ... }
-    
     const applyChanges = async (Model, items) => {
-      if (!items || !items.length) return
-      for (const item of items) {
-        item.userId = req.userId
-        item.clientId = item.id // Store Dexie ID as clientId
-        delete item.id // remove dexie id so mongoose doesn't complain or use it as _id
-
-        // Upsert by clientId
+      for (const source of items) {
+        const existing = await Model.findOne({ userId: req.userId, syncId: source.syncId }).select('updatedAt').lean()
+        if (existing?.updatedAt && existing.updatedAt > source.updatedAt) continue
+        const { id, userId, syncStatus, categoryId, ...record } = source
         await Model.findOneAndUpdate(
-          { userId: req.userId, clientId: item.clientId },
-          item,
-          { upsert: true, new: true }
+          { userId: req.userId, syncId: record.syncId },
+          { ...record, userId: req.userId, serverUpdatedAt: new Date() },
+          { upsert: true, runValidators: true, setDefaultsOnInsert: true },
         )
       }
     }
 
-    await applyChanges(models.FoodLog, changes.foodLogs)
-    await applyChanges(models.Category, changes.categories)
-    await applyChanges(models.Transaction, changes.transactions)
-    await applyChanges(models.ActivityLog, changes.activityLogs)
-    await applyChanges(models.SleepLog, changes.sleepLogs)
-
+    const { changes } = req.body
+    await applyChanges(models.Category, changes.categories ?? [])
+    await applyChanges(models.FoodLog, changes.foodLogs ?? [])
+    await applyChanges(models.Transaction, changes.transactions ?? [])
+    await applyChanges(models.ActivityLog, changes.activityLogs ?? [])
+    await applyChanges(models.SleepLog, changes.sleepLogs ?? [])
     res.json({ success: true })
-  } catch (err) {
-    console.error(err)
+  } catch (error) {
+    console.error('Sync push failed:', error)
     res.status(500).json({ error: 'Sync failed' })
   }
 })
 
-// Sync Pull (Server -> Client)
-app.get('/api/sync/pull', auth, async (req, res) => {
+app.get('/api/sync/pull', syncLimiter, authenticate, async (req, res) => {
+  const lastSync = req.query.lastSync || '1970-01-01T00:00:00.000Z'
+  if (!isIsoDate(lastSync)) return res.status(400).json({ error: 'lastSync must be an ISO-8601 timestamp' })
+
   try {
-    const lastSync = req.query.lastSync || '1970-01-01T00:00:00.000Z'
-    
-    // Find all records updated after lastSync
-    const query = { userId: req.userId, updatedAt: { $gt: lastSync } }
-
-    const foodLogs = await models.FoodLog.find(query).lean()
-    const categories = await models.Category.find(query).lean()
-    const transactions = await models.Transaction.find(query).lean()
-    const activityLogs = await models.ActivityLog.find(query).lean()
-    const sleepLogs = await models.SleepLog.find(query).lean()
-
-    // Map clientId back to id for Dexie
-    const mapToClient = (items) => items.map(i => {
-      const { _id, userId, clientId, __v, ...rest } = i
-      return { id: clientId, ...rest }
-    })
-
-    res.json({
-      changes: {
-        foodLogs: mapToClient(foodLogs),
-        categories: mapToClient(categories),
-        transactions: mapToClient(transactions),
-        activityLogs: mapToClient(activityLogs),
-        sleepLogs: mapToClient(sleepLogs),
-      },
-      timestamp: new Date().toISOString()
-    })
-  } catch (err) {
-    console.error(err)
+    const timestamp = new Date()
+    const query = { userId: req.userId, serverUpdatedAt: { $gt: new Date(lastSync), $lte: timestamp } }
+    const [foodLogs, categories, transactions, activityLogs, sleepLogs] = await Promise.all([
+      models.FoodLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.Category.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.Transaction.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.ActivityLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.SleepLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+    ])
+    res.json({ changes: { foodLogs, categories, transactions, activityLogs, sleepLogs }, timestamp: timestamp.toISOString() })
+  } catch (error) {
+    console.error('Sync pull failed:', error)
     res.status(500).json({ error: 'Pull failed' })
   }
 })
 
+app.use((error, _req, res, _next) => {
+  if (error instanceof SyntaxError) return res.status(400).json({ error: 'Invalid JSON body' })
+  console.error(error)
+  res.status(500).json({ error: 'Internal server error' })
+})
+
 const PORT = process.env.PORT || 3001
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
+app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`))

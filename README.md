@@ -11,7 +11,7 @@ the sibling `client` repository and must be configured and run separately.
 
 - Register users and hash passwords with bcrypt
 - Authenticate users and issue JWTs
-- Accept client-side changes and upsert them by user and client record ID
+- Accept client-side changes and upsert them by user and UUID sync identity
 - Return records updated since a supplied timestamp
 - Restrict browser requests to configured frontend origins
 
@@ -103,12 +103,16 @@ The server listens on `http://localhost:3001` by default. Its default CORS
 allowlist includes `http://localhost:5173` and `http://localhost:4173` when
 `FRONTEND_URL` is not set.
 
+`GET /api/health` reports API and MongoDB readiness. It returns `200` while
+MongoDB is connected and `503` while the API is degraded.
+
 ## Environment variables
 
 | Variable | Required | Description |
 | --- | --- | --- |
 | `MONGODB_URI` | Production | MongoDB connection URI; defaults to `mongodb://localhost:27017/lifetrack` |
 | `JWT_SECRET` | Production | Secret used to sign and verify JWTs; the process exits if absent in production |
+| `JWT_EXPIRES_IN` | No | JWT lifetime accepted by `jsonwebtoken`; defaults to `7d` |
 | `FRONTEND_URL` | No | Comma-separated exact origins allowed by CORS |
 | `NODE_ENV` | No | Set to `production` to enforce a configured JWT secret |
 | `PORT` | No | HTTP port; defaults to `3001` |
@@ -161,8 +165,8 @@ return `401`.
 
 ### `POST /api/sync/push`
 
-Upserts records by the authenticated `userId` and the client's numeric `id`.
-The server stores that local ID as `clientId`.
+Upserts records by the authenticated `userId` and the record's stable UUID
+`syncId`. Local numeric IndexedDB IDs are ignored by the API.
 
 ```json
 {
@@ -180,8 +184,8 @@ Successful response: `{ "success": true }`.
 
 ### `GET /api/sync/pull?lastSync=<ISO-8601 timestamp>`
 
-Returns records whose `updatedAt` value is later than `lastSync`. If omitted,
-the timestamp defaults to the Unix epoch.
+Returns records whose server-generated sync timestamp is later than `lastSync`.
+If omitted, the timestamp defaults to the Unix epoch.
 
 ```json
 {
@@ -196,36 +200,27 @@ the timestamp defaults to the Unix epoch.
 }
 ```
 
-MongoDB-only fields are removed and `clientId` is returned as `id`.
+MongoDB-only fields are removed. `syncId` is returned unchanged and the client
+resolves it to the appropriate local IndexedDB ID.
 
 ## Data model and sync behavior
 
 `models.js` defines `User`, `FoodLog`, `Category`, `Transaction`, `ActivityLog`,
-and `SleepLog`. Each synchronized record belongs to a user and carries its
-client-generated numeric ID. Pushes are processed one item at a time and are
-upserts, making repeated writes for the same `(userId, clientId)` logically
-idempotent.
+and `SleepLog`. Each synchronized record belongs to a user and carries a UUID.
+A unique compound index on `(userId, syncId)` makes repeated writes idempotent.
 
 The API does not currently expose hydration, budgets, timers, settings, or food
-cache. It also has no delete endpoint; the schemas include a `deleted` flag,
-but the client does not currently send tombstones when a local row is removed.
+cache. Deletion uses a `deleted` tombstone sent through the normal sync endpoint.
 
-## Known compatibility gaps
+## Sync constraints
 
-The checked-in client and server schemas are not fully aligned:
-
-- Client food rows use `foodName`, `mealType`, `carbs`, `fat`, and other macro
-  fields; the server requires `name` and `time` and does not define most of
-  those client fields.
-- Client categories use `icon` and `isDefault`; the server requires `emoji` and
-  uses a different optional `budget` field.
-- Client timestamps are strings. Pull filtering therefore depends on consistent
-  ISO-8601 values rather than MongoDB date fields.
-- The schemas do not define a unique compound index on `(userId, clientId)`, so
-  concurrent first-time upserts are not protected by a database constraint.
-
-Align and migrate both repositories' models before relying on cross-device sync
-in production.
+Client timestamps are ISO-8601 strings and conflict resolution compares those
+timestamps lexicographically, so device clocks should be reasonably accurate.
+Incremental pull watermarks use a separate server-generated timestamp so clock
+skew cannot cause records to be skipped.
+Hydration, budgets, timers, settings, and food cache remain local-only. The
+rate limiter is held in process memory and needs a shared store before scaling
+the API to multiple instances.
 
 ## Production notes
 
@@ -233,6 +228,6 @@ in production.
   client origin in `FRONTEND_URL`.
 - Multiple frontend origins may be comma-separated, with no path component.
 - Run behind HTTPS and a production process manager or hosting platform.
-- Add request validation, rate limiting, token expiry/refresh, structured error
-  handling, and automated tests before exposing the API publicly.
+- Add refresh tokens, structured production logging, a shared rate-limit store,
+  and automated tests before exposing the API to untrusted users.
 - Avoid logging credentials, tokens, or MongoDB connection strings.
