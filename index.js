@@ -14,6 +14,7 @@ const {
   applySyncChanges,
   pullSyncChanges,
 } = require('./sync-service')
+const { createAuthenticate } = require('./auth-middleware')
 
 const app = express()
 if (process.env.NODE_ENV === 'production') app.set('trust proxy', 1)
@@ -74,16 +75,7 @@ function rateLimit({ windowMs, max }) {
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 })
 const syncLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 })
 
-function authenticate(req, res, next) {
-  const [scheme, token] = (req.headers.authorization || '').split(' ')
-  if (scheme !== 'Bearer' || !token) return res.status(401).json({ error: 'Unauthorized' })
-  try {
-    req.userId = jwt.verify(token, JWT_SECRET).userId
-    next()
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' })
-  }
-}
+const authenticate = createAuthenticate(jwt, JWT_SECRET)
 
 app.get('/api/health', (_req, res) => {
   const database = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'

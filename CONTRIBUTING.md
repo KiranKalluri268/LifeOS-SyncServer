@@ -41,11 +41,11 @@ Before opening a pull request, run:
 ```bash
 node --check index.js
 node --check models.js
-npm start
+npm test
 ```
 
-The repository does not yet have an automated test suite, so API changes also
-require manual verification:
+The unit suite does not connect to MongoDB, so API changes also require manual
+integration verification:
 
 1. `GET /api/health` returns `200` with a connected database.
 2. Registration validates input and duplicate email addresses.

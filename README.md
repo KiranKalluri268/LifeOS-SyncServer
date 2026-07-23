@@ -126,9 +126,22 @@ example `openssl rand -hex 64`. Never commit `.env`.
 | --- | --- |
 | `npm start` | Start the server with Node.js |
 | `npm run dev` | Start with Node.js watch mode |
+| `npm test` | Run validation and synchronization unit tests |
 
-The package contains a placeholder `test` script; there is currently no
-automated test suite.
+## Testing
+
+The test suite uses Node's built-in test runner and requires no test-only
+dependencies or database connection:
+
+```bash
+npm test
+```
+
+It covers bearer-token authentication, request validation, every synchronized
+collection, payload limits, tenant-scoped queries and writes, local-field
+removal, tombstones, timestamp conflicts, pull cursor windows, and database
+error propagation. Full HTTP route tests and real MongoDB integration tests
+remain a later hardening layer.
 
 ## API
 
@@ -236,7 +249,8 @@ multiple instances.
 - Multiple frontend origins may be comma-separated, with no path component.
 - Run behind HTTPS and a production process manager or hosting platform.
 - Add refresh tokens, structured production logging, a shared rate-limit store,
-  and automated tests before exposing the API to untrusted users.
+  and database-backed route integration tests before exposing the API to
+  untrusted users.
 - Avoid logging credentials, tokens, or MongoDB connection strings.
 
 ## Contributing
