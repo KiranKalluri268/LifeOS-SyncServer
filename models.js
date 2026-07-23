@@ -42,6 +42,17 @@ const FoodLogSchema = syncSchema({
   notes: String,
 })
 
+const LiquidLogSchema = syncSchema({
+  date: { type: String, required: true },
+  liquidType: {
+    type: String,
+    enum: ['water', 'coffee', 'tea', 'juice', 'alcohol', 'other'],
+    required: true,
+  },
+  amountMl: { type: Number, required: true },
+  notes: String,
+})
+
 const CategorySchema = syncSchema({
   name: { type: String, required: true },
   icon: { type: String, required: true },
@@ -55,6 +66,12 @@ const TransactionSchema = syncSchema({
   categorySyncId: { type: String, required: true },
   date: { type: String, required: true },
   note: String,
+})
+
+const BudgetSchema = syncSchema({
+  categorySyncId: { type: String, required: true },
+  month: { type: String, required: true },
+  amount: { type: Number, required: true },
 })
 
 const ActivityLogSchema = syncSchema({
@@ -75,11 +92,27 @@ const SleepLogSchema = syncSchema({
   notes: String,
 })
 
+const UserSettingsSchema = syncSchema({
+  calorieTarget: { type: Number, required: true },
+  proteinTargetG: { type: Number, required: true },
+  carbTargetG: { type: Number, required: true },
+  fatTargetG: { type: Number, required: true },
+  waterTargetMl: { type: Number, required: true },
+  currency: { type: String, required: true },
+  currencyCode: { type: String, required: true },
+  weekStartDay: { type: Number, enum: [0, 1], required: true },
+  theme: { type: String, enum: ['dark', 'light', 'system'], required: true },
+})
+UserSettingsSchema.index({ userId: 1 }, { unique: true })
+
 module.exports = {
   User: mongoose.model('User', UserSchema),
   FoodLog: mongoose.model('FoodLog', FoodLogSchema),
+  LiquidLog: mongoose.model('LiquidLog', LiquidLogSchema),
   Category: mongoose.model('Category', CategorySchema),
   Transaction: mongoose.model('Transaction', TransactionSchema),
+  Budget: mongoose.model('Budget', BudgetSchema),
   ActivityLog: mongoose.model('ActivityLog', ActivityLogSchema),
   SleepLog: mongoose.model('SleepLog', SleepLogSchema),
+  UserSettings: mongoose.model('UserSettings', UserSettingsSchema),
 }

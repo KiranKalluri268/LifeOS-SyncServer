@@ -172,10 +172,13 @@ Upserts records by the authenticated `userId` and the record's stable UUID
 {
   "changes": {
     "foodLogs": [],
+    "liquidLogs": [],
     "categories": [],
     "transactions": [],
+    "budgets": [],
     "activityLogs": [],
-    "sleepLogs": []
+    "sleepLogs": [],
+    "userSettings": []
   }
 }
 ```
@@ -191,10 +194,13 @@ If omitted, the timestamp defaults to the Unix epoch.
 {
   "changes": {
     "foodLogs": [],
+    "liquidLogs": [],
     "categories": [],
     "transactions": [],
+    "budgets": [],
     "activityLogs": [],
-    "sleepLogs": []
+    "sleepLogs": [],
+    "userSettings": []
   },
   "timestamp": "2026-01-01T12:00:00.000Z"
 }
@@ -205,12 +211,13 @@ resolves it to the appropriate local IndexedDB ID.
 
 ## Data model and sync behavior
 
-`models.js` defines `User`, `FoodLog`, `Category`, `Transaction`, `ActivityLog`,
-and `SleepLog`. Each synchronized record belongs to a user and carries a UUID.
-A unique compound index on `(userId, syncId)` makes repeated writes idempotent.
+`models.js` defines `User` plus synchronized food, hydration, expense, budget,
+activity, sleep, and settings records. Each synchronized record belongs to a
+user and carries a UUID. A unique compound index on `(userId, syncId)` makes
+repeated writes idempotent.
 
-The API does not currently expose hydration, budgets, timers, settings, or food
-cache. Deletion uses a `deleted` tombstone sent through the normal sync endpoint.
+Active timers and the food product cache intentionally remain device-local.
+Deletion uses a `deleted` tombstone sent through the normal sync endpoint.
 
 ## Sync constraints
 
@@ -218,9 +225,9 @@ Client timestamps are ISO-8601 strings and conflict resolution compares those
 timestamps lexicographically, so device clocks should be reasonably accurate.
 Incremental pull watermarks use a separate server-generated timestamp so clock
 skew cannot cause records to be skipped.
-Hydration, budgets, timers, settings, and food cache remain local-only. The
-rate limiter is held in process memory and needs a shared store before scaling
-the API to multiple instances.
+Active timers and the food product cache remain local-only. The rate limiter is
+held in process memory and needs a shared store before scaling the API to
+multiple instances.
 
 ## Production notes
 

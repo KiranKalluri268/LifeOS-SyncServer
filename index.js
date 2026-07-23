@@ -71,6 +71,7 @@ const isOptionalString = (value, max = 500) => value === undefined || (typeof va
 const isNumber = value => typeof value === 'number' && Number.isFinite(value)
 const isIsoDate = value => isString(value, 40) && !Number.isNaN(Date.parse(value))
 const isDay = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+const isMonth = value => typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value)
 const isUuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 
 function validateAuthBody(body) {
@@ -83,10 +84,13 @@ function validateAuthBody(body) {
 const commonRecordValid = item => isObject(item) && isUuid(item.syncId) && typeof item.deleted === 'boolean' && isIsoDate(item.createdAt) && isIsoDate(item.updatedAt)
 const validators = {
   foodLogs: item => commonRecordValid(item) && isDay(item.date) && ['breakfast', 'lunch', 'dinner', 'snack', 'other'].includes(item.mealType) && isString(item.foodName, 200) && isNumber(item.calories) && isNumber(item.protein) && isNumber(item.carbs) && isNumber(item.fat) && isNumber(item.servingSize) && isString(item.servingUnit, 30) && isNumber(item.quantity) && ['manual', 'openfoodfacts', 'barcode'].includes(item.source) && isOptionalString(item.brand, 200) && isOptionalString(item.notes, 1000),
+  liquidLogs: item => commonRecordValid(item) && isDay(item.date) && ['water', 'coffee', 'tea', 'juice', 'alcohol', 'other'].includes(item.liquidType) && isNumber(item.amountMl) && item.amountMl > 0 && item.amountMl <= 10000 && isOptionalString(item.notes, 1000),
   categories: item => commonRecordValid(item) && isString(item.name, 100) && isString(item.icon, 100) && isString(item.color, 30) && typeof item.isDefault === 'boolean',
   transactions: item => commonRecordValid(item) && ['expense', 'income'].includes(item.type) && isNumber(item.amount) && item.amount >= 0 && isUuid(item.categorySyncId) && isDay(item.date) && isOptionalString(item.note, 1000),
+  budgets: item => commonRecordValid(item) && isUuid(item.categorySyncId) && isMonth(item.month) && isNumber(item.amount) && item.amount > 0,
   activityLogs: item => commonRecordValid(item) && isDay(item.date) && isString(item.category, 50) && isIsoDate(item.startTime) && isIsoDate(item.endTime) && isNumber(item.durationMins) && item.durationMins >= 0 && isOptionalString(item.note, 1000),
   sleepLogs: item => commonRecordValid(item) && isDay(item.date) && isIsoDate(item.bedtime) && isIsoDate(item.wakeTime) && isNumber(item.durationMins) && item.durationMins >= 0 && Number.isInteger(item.quality) && item.quality >= 1 && item.quality <= 5 && isOptionalString(item.notes, 1000),
+  userSettings: item => commonRecordValid(item) && isNumber(item.calorieTarget) && item.calorieTarget > 0 && isNumber(item.proteinTargetG) && item.proteinTargetG >= 0 && isNumber(item.carbTargetG) && item.carbTargetG >= 0 && isNumber(item.fatTargetG) && item.fatTargetG >= 0 && isNumber(item.waterTargetMl) && item.waterTargetMl > 0 && isString(item.currency, 10) && isString(item.currencyCode, 10) && [0, 1].includes(item.weekStartDay) && ['dark', 'light', 'system'].includes(item.theme),
 }
 
 function validateChanges(body) {
@@ -156,7 +160,7 @@ app.post('/api/sync/push', syncLimiter, authenticate, async (req, res) => {
       for (const source of items) {
         const existing = await Model.findOne({ userId: req.userId, syncId: source.syncId }).select('updatedAt').lean()
         if (existing?.updatedAt && existing.updatedAt > source.updatedAt) continue
-        const { id, userId, syncStatus, categoryId, ...record } = source
+        const { id, userId, syncStatus, categoryId, lastSyncAt, ...record } = source
         await Model.findOneAndUpdate(
           { userId: req.userId, syncId: record.syncId },
           { ...record, userId: req.userId, serverUpdatedAt: new Date() },
@@ -168,9 +172,12 @@ app.post('/api/sync/push', syncLimiter, authenticate, async (req, res) => {
     const { changes } = req.body
     await applyChanges(models.Category, changes.categories ?? [])
     await applyChanges(models.FoodLog, changes.foodLogs ?? [])
+    await applyChanges(models.LiquidLog, changes.liquidLogs ?? [])
     await applyChanges(models.Transaction, changes.transactions ?? [])
+    await applyChanges(models.Budget, changes.budgets ?? [])
     await applyChanges(models.ActivityLog, changes.activityLogs ?? [])
     await applyChanges(models.SleepLog, changes.sleepLogs ?? [])
+    await applyChanges(models.UserSettings, changes.userSettings ?? [])
     res.json({ success: true })
   } catch (error) {
     console.error('Sync push failed:', error)
@@ -185,14 +192,38 @@ app.get('/api/sync/pull', syncLimiter, authenticate, async (req, res) => {
   try {
     const timestamp = new Date()
     const query = { userId: req.userId, serverUpdatedAt: { $gt: new Date(lastSync), $lte: timestamp } }
-    const [foodLogs, categories, transactions, activityLogs, sleepLogs] = await Promise.all([
+    const [
+      foodLogs,
+      liquidLogs,
+      categories,
+      transactions,
+      budgets,
+      activityLogs,
+      sleepLogs,
+      userSettings,
+    ] = await Promise.all([
       models.FoodLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.LiquidLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
       models.Category.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
       models.Transaction.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.Budget.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
       models.ActivityLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
       models.SleepLog.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
+      models.UserSettings.find(query).select('-_id -userId -serverUpdatedAt -__v').lean(),
     ])
-    res.json({ changes: { foodLogs, categories, transactions, activityLogs, sleepLogs }, timestamp: timestamp.toISOString() })
+    res.json({
+      changes: {
+        foodLogs,
+        liquidLogs,
+        categories,
+        transactions,
+        budgets,
+        activityLogs,
+        sleepLogs,
+        userSettings,
+      },
+      timestamp: timestamp.toISOString(),
+    })
   } catch (error) {
     console.error('Sync pull failed:', error)
     res.status(500).json({ error: 'Pull failed' })
